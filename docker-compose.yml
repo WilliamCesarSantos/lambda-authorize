@@ -1,0 +1,19 @@
+services:
+  lambda-authorize:
+    build: .
+    image: lambda-authorize:local
+    ports:
+      - "9000:8080"
+    env_file:
+      - .env
+
+# ---------------------------------------------------------------------------
+# Como testar (após `docker compose up`):
+#
+#   curl -s -XPOST http://localhost:9000/2015-03-31/functions/function/invocations \
+#     -H "Content-Type: application/json" \
+#     -d '{"body": "{\"email\":\"admin@example.com\",\"password\":\"admin\"}"}'
+#
+# Resposta esperada:
+#   {"statusCode": 200, ..., "body": "{\"token\": \"<jwt>\"}"}
+# ---------------------------------------------------------------------------

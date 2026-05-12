@@ -1,0 +1,13 @@
+# Arquivos sensíveis e de desenvolvimento não precisam entrar na imagem Docker
+.env
+.env.example
+.github/
+docker-compose.yml
+.gitignore
+*.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
