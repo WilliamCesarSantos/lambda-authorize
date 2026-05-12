@@ -1,25 +1,30 @@
 """
-Lambda Authorizer — emite um token JWT para usuários válidos.
+Lambda Authorizer — emite um token JWT assinado com RS256 para usuários válidos.
+
+Endpoints:
+  POST /token      — autentica e retorna um JWT assinado com chave privada RSA
+  GET  /public-key — retorna a chave pública (PEM) para verificação do token
 
 Fonte de usuários (em ordem de precedência):
-  1. Variável de ambiente USERS_LIST  → JSON inline (ideal para testes locais)
+  1. Variável de ambiente USERS_LIST  → JSON inline (ideal para testes locais rápidos)
   2. AWS SSM Parameter Store          → parâmetro definido em USERS_PARAM_NAME
                                         (padrão: /lambda-authorize/users)
 
 Formato da lista de usuários:
-  [{"name": "Fulano", "email": "fulano@exemplo.com", "senha": "<md5-da-senha>"}]
+  [{"name": "Fulano", "email": "fulano@exemplo.com", "senha": "<hash-md5>"}]
 
-Requisição esperada (body JSON):
+Requisição de autenticação (body JSON):
   {"email": "fulano@exemplo.com", "password": "senha-em-texto-plano"}
 
 Resposta de sucesso (200):
-  {"token": "<jwt>"}   — payload contém: name, email, iat, exp
+  {"token": "<jwt-rs256>"}   — payload contém: name, email, iat, exp
 """
 
 import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -38,14 +43,21 @@ def _get_users() -> list[dict]:
 
     param_name = os.environ.get("USERS_PARAM_NAME", "/lambda-authorize/users")
     region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+    endpoint_url = os.environ.get("AWS_ENDPOINT_URL")
 
-    ssm = boto3.client("ssm", region_name=region)
+    ssm = boto3.client("ssm", region_name=region, endpoint_url=endpoint_url)
     response = ssm.get_parameter(Name=param_name, WithDecryption=True)
     return json.loads(response["Parameter"]["Value"])
 
 
+def _load_key(env_var: str, default_path: str) -> bytes:
+    """Lê uma chave PEM do caminho definido em env_var ou do caminho padrão."""
+    key_path = os.environ.get(env_var, default_path)
+    return Path(key_path).read_bytes()
+
+
 def _md5(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    return hashlib.md5(text.encode("utf-8")).hexdigest()  # noqa: S324
 
 
 def _build_response(status_code: int, body: dict) -> dict:
@@ -56,11 +68,38 @@ def _build_response(status_code: int, body: dict) -> dict:
     }
 
 
+def _get_http_method(event: dict) -> str:
+    """Extrai o método HTTP de eventos API Gateway v1, v2 ou invocação direta."""
+    return (
+        event.get("httpMethod")
+        or event.get("requestContext", {}).get("http", {}).get("method")
+        or "POST"
+    ).upper()
+
+
+def _get_path(event: dict) -> str:
+    """Extrai o path de eventos API Gateway v1, v2 ou invocação direta."""
+    return event.get("path") or event.get("rawPath") or "/"
+
+
 # ---------------------------------------------------------------------------
-# Handler
+# Handlers por endpoint
 # ---------------------------------------------------------------------------
 
-def lambda_handler(event: dict, context) -> dict:  # noqa: ANN001
+def _handle_public_key() -> dict:
+    """Retorna a chave pública RSA em formato PEM."""
+    try:
+        public_key_pem = _load_key(
+            "JWT_PUBLIC_KEY_PATH", "/var/task/certs/public.pem"
+        ).decode("utf-8")
+    except (FileNotFoundError, OSError) as exc:
+        return _build_response(500, {"error": f"Chave pública não encontrada: {exc}"})
+
+    return _build_response(200, {"publicKey": public_key_pem})
+
+
+def _handle_token(event: dict) -> dict:
+    """Autentica o usuário e emite um token JWT RS256."""
     # --- Parse body ---
     try:
         body = json.loads(event.get("body") or "{}")
@@ -95,10 +134,14 @@ def lambda_handler(event: dict, context) -> dict:  # noqa: ANN001
     if user is None:
         return _build_response(401, {"error": "Credenciais inválidas"})
 
-    # --- Emitir token JWT ---
-    secret = os.environ.get("JWT_SECRET", "change-me-in-production")
-    expiration_hours = int(os.environ.get("JWT_EXPIRATION_HOURS", "1"))
+    # --- Carregar chave privada RSA ---
+    try:
+        private_key = _load_key("JWT_PRIVATE_KEY_PATH", "/var/task/certs/private.pem")
+    except (FileNotFoundError, OSError) as exc:
+        return _build_response(500, {"error": f"Chave privada não encontrada: {exc}"})
 
+    # --- Emitir token JWT RS256 ---
+    expiration_hours = int(os.environ.get("JWT_EXPIRATION_HOURS", "1"))
     now = datetime.now(timezone.utc)
     payload = {
         "name": user["name"],
@@ -107,6 +150,19 @@ def lambda_handler(event: dict, context) -> dict:  # noqa: ANN001
         "exp": now + timedelta(hours=expiration_hours),
     }
 
-    token = jwt.encode(payload, secret, algorithm="HS256")
-
+    token = jwt.encode(payload, private_key, algorithm="RS256")
     return _build_response(200, {"token": token})
+
+
+# ---------------------------------------------------------------------------
+# Handler principal
+# ---------------------------------------------------------------------------
+
+def lambda_handler(event: dict, context) -> dict:  # noqa: ANN001
+    method = _get_http_method(event)
+    path = _get_path(event)
+
+    if method == "GET" and path.rstrip("/") in ("/public-key", "/publickey"):
+        return _handle_public_key()
+
+    return _handle_token(event)

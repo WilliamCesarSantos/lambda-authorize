@@ -6,6 +6,9 @@ docker-compose.yml
 .gitignore
 *.md
 
+# Certificados — montados como volume em tempo de execução (não incluir na imagem)
+certs/
+
 # Python
 __pycache__/
 *.py[cod]

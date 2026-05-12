@@ -1,4 +1,50 @@
 services:
+
+  # --------------------------------------------------------------------------
+  # LocalStack — emula o AWS SSM Parameter Store localmente
+  # --------------------------------------------------------------------------
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: ssm
+      DEBUG: "0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # --------------------------------------------------------------------------
+  # ssm-init — inicializa o parâmetro de usuários no SSM (LocalStack)
+  # --------------------------------------------------------------------------
+  ssm-init:
+    image: amazon/aws-cli:2.22.0
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: dummy
+      AWS_SECRET_ACCESS_KEY: dummy
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+    entrypoint: ["/bin/bash", "-c"]
+    # Edite o valor de --value para configurar seus usuários.
+    # O campo "senha" é o hash MD5 da senha em texto plano.
+    #   admin@example.com / admin   → MD5: 21232f297a57a5a743894a0e4a801fc3
+    #   joao@example.com  / 123456  → MD5: e10adc3949ba59abbe56e057f20f883e
+    command: |
+      aws ssm put-parameter \
+        --name /lambda-authorize/users \
+        --value '[{"name":"Admin","email":"admin@example.com","senha":"21232f297a57a5a743894a0e4a801fc3"},{"name":"Joao Silva","email":"joao@example.com","senha":"e10adc3949ba59abbe56e057f20f883e"}]' \
+        --type SecureString \
+        --overwrite \
+      && echo "[ssm-init] Parameter /lambda-authorize/users initialized."
+
+  # --------------------------------------------------------------------------
+  # lambda-authorize — função Lambda com runtime local (AWS RIE)
+  # --------------------------------------------------------------------------
   lambda-authorize:
     build: .
     image: lambda-authorize:local
@@ -6,14 +52,21 @@ services:
       - "9000:8080"
     env_file:
       - .env
+    volumes:
+      - ./certs:/var/task/certs:ro
+    depends_on:
+      ssm-init:
+        condition: service_completed_successfully
 
 # ---------------------------------------------------------------------------
-# Como testar (após `docker compose up`):
+# Como testar (após `docker compose up --build`):
 #
+# Autenticar:
 #   curl -s -XPOST http://localhost:9000/2015-03-31/functions/function/invocations \
 #     -H "Content-Type: application/json" \
-#     -d '{"body": "{\"email\":\"admin@example.com\",\"password\":\"admin\"}"}'
+#     -d '{"body": "{\"email\":\"admin@example.com\",\"password\":\"admin\"}"}'  
 #
-# Resposta esperada:
-#   {"statusCode": 200, ..., "body": "{\"token\": \"<jwt>\"}"}
-# ---------------------------------------------------------------------------
+# Obter chave pública:
+#   curl -s -XPOST http://localhost:9000/2015-03-31/functions/function/invocations \
+#     -H "Content-Type: application/json" \
+#     -d '{"httpMethod":"GET","path":"/public-key"}'

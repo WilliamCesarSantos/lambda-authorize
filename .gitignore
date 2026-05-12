@@ -1,6 +1,10 @@
 # Variáveis de ambiente locais (nunca commitar)
 .env
 
+# Certificados — gere localmente com scripts/generate-certs.sh
+certs/*
+!certs/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]
