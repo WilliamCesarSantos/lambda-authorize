@@ -1,7 +1,7 @@
 # Variáveis de ambiente locais (nunca commitar)
 .env
 
-# Certificados — gere localmente com scripts/generate-certs.sh
+# Certificados — gere localmente com OpenSSL (nunca commitar)
 certs/*
 !certs/.gitkeep
 

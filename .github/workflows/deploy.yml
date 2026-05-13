@@ -1,0 +1,101 @@
+name: Deploy to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de deploy'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      aws_region:
+        description: 'Região AWS'
+        required: true
+        default: 'sa-east-1'
+        type: choice
+        options:
+          - sa-east-1
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+
+jobs:
+  deploy:
+    name: Deploy via Terraform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build Lambda package
+        run: |
+          pip install -r requirements.txt -t package/
+          cd package && zip -r ../lambda.zip . && cd ..
+          zip -r lambda.zip src/
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Get AWS Account ID
+        id: account
+        run: echo "id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Init
+        working-directory: terraform
+        env:
+          TF_BACKEND_BUCKET: lambda-authorize-tfstate-${{ steps.account.outputs.id }}
+          TF_BACKEND_REGION: ${{ inputs.aws_region }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=lambda-authorize/terraform.tfstate" \
+            -backend-config="region=${TF_BACKEND_REGION}"
+
+      - name: Terraform Plan
+        working-directory: terraform
+        env:
+          TF_VAR_environment: ${{ inputs.environment }}
+          TF_VAR_aws_region: ${{ inputs.aws_region }}
+          TF_VAR_pepper: ${{ secrets.TF_VAR_PEPPER }}
+          TF_VAR_private_key_pem: ${{ secrets.TF_VAR_PRIVATE_KEY_PEM }}
+          TF_VAR_public_key_pem: ${{ secrets.TF_VAR_PUBLIC_KEY_PEM }}
+          TF_VAR_jwks_kid: ${{ secrets.TF_VAR_JWKS_KID }}
+          TF_VAR_lambda_zip_path: ${{ github.workspace }}/lambda.zip
+        run: terraform plan -out=tfplan
+
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+      - name: Terraform Apply
+        working-directory: terraform
+        env:
+          TF_VAR_environment: ${{ inputs.environment }}
+          TF_VAR_aws_region: ${{ inputs.aws_region }}
+          TF_VAR_pepper: ${{ secrets.TF_VAR_PEPPER }}
+          TF_VAR_private_key_pem: ${{ secrets.TF_VAR_PRIVATE_KEY_PEM }}
+          TF_VAR_public_key_pem: ${{ secrets.TF_VAR_PUBLIC_KEY_PEM }}
+          TF_VAR_jwks_kid: ${{ secrets.TF_VAR_JWKS_KID }}
+          TF_VAR_lambda_zip_path: ${{ github.workspace }}/lambda.zip
+        run: terraform apply -auto-approve tfplan
