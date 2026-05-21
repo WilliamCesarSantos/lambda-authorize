@@ -2,7 +2,7 @@ INSERT INTO users (name, email, password_hash, roles) VALUES
 (
     'William Cesar Santos',
     'william_cesar_santos@hotmail.com',
-    '$argon2id$v=19$m=65536,t=3,p=4$oMI7dPuZD9JmemIhXLr1Qw$qfsUbmhrCysvix+/ycXcCqjjWVdpaD/R2Qayxil3CN4',
+    '$argon2id$v=19$m=65536,t=3,p=4$cfKIYiDHyUhjEEUBT/UAtg$l9DelUkeoA0eRdhkGCO74KcvHtu7NNG5FIx6as6shZM',
     '{admin}'
 ),
 (

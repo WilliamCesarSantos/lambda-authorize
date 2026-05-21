@@ -1,84 +1,90 @@
 services:
 
   # --------------------------------------------------------------------------
-  # LocalStack — emula o AWS Secrets Manager localmente
+  # lambda-builder — instala dependências e empacota o código em lambda.zip
   # --------------------------------------------------------------------------
-  localstack:
-    image: localstack/localstack:4.14.0
-    ports:
-      - "4566:4566"
-    environment:
-      SERVICES: secretsmanager
-      DEBUG: "0"
+  lambda-builder:
+    image: public.ecr.aws/lambda/python:3.13
+    entrypoint: ["/bin/bash", "/build.sh"]
     volumes:
-      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/01_init.sh:ro
-      - ./certs:/certs:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 15
+      - ./src:/lambda/src:ro
+      - ./requirements.txt:/lambda/requirements.txt:ro
+      - ./init/lambda/build.sh:/build.sh:ro
+      - lambda-zip:/lambda/dist
+    restart: "no"
+    networks:
+      - lambda-authorize-net
 
   # --------------------------------------------------------------------------
   # PostgreSQL — banco de dados local com schema e seed automáticos
   # --------------------------------------------------------------------------
   postgres:
-    image: postgres:17.4
+    image: postgres:18.4
     environment:
       POSTGRES_DB: lambdaauth
       POSTGRES_USER: lambda
       POSTGRES_PASSWORD: lambda
     volumes:
-      - ./migrations/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ./migrations/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+      - ./init/database:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lambda -d lambdaauth"]
       interval: 5s
       timeout: 5s
       retries: 15
+    networks:
+      - lambda-authorize-net
 
   # --------------------------------------------------------------------------
-  # lambda-authorize — função Lambda com runtime local (AWS RIE)
+  # LocalStack — emula AWS Secrets Manager, Lambda e API Gateway localmente
+  # Não exposto diretamente; o gateway nginx roteia /auth/v1/login para cá.
   # --------------------------------------------------------------------------
-  lambda-authorize:
-    build: .
-    image: lambda-authorize:local
-    ports:
-      - "8080:8080"
+  localstack:
+    image: localstack/localstack:4.14.0
     environment:
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: lambdaauth
-      DB_USER: lambda
-      DB_PASSWORD: lambda
-      AWS_ENDPOINT_URL: http://localstack:4566
-      AWS_ACCESS_KEY_ID: dummy
-      AWS_SECRET_ACCESS_KEY: dummy
-      AWS_REGION: sa-east-1
-      JWT_EXPIRATION_HOURS: "1"
-      PEPPER_SECRET_NAME: /lambda-authorize/pepper
-      PRIVATE_KEY_SECRET_NAME: /lambda-authorize/private-key
-      PUBLIC_KEY_SECRET_NAME: /lambda-authorize/public-key
-      JWKS_KID: dev-key-1
+      SERVICES: secretsmanager,lambda,apigateway,route53
+      DEBUG: "0"
+      LOCALSTACK_HOST: localhost:4566
+    volumes:
+      - ./init/aws:/etc/localstack/init/ready.d:ro
+      - ./init/certs:/usr/share/localstack/certs:ro
+      - lambda-zip:/var/lib/localstack/lambda-zip:ro
+      - gateway-config:/gateway-config
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    depends_on:
+      lambda-builder:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks:
+      - lambda-authorize-net
+
+  # --------------------------------------------------------------------------
+  # Gateway nginx — único serviço exposto; roteia /auth/v1/login para a Lambda
+  # http://localhost:4566/auth/v1/login
+  # --------------------------------------------------------------------------
+  gateway:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    entrypoint: ["/bin/sh", "/start.sh"]
+    volumes:
+      - ./init/nginx/start.sh:/start.sh:ro
+      - gateway-config:/gateway-config:ro
     depends_on:
       localstack:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
+    networks:
+      - lambda-authorize-net
 
-# ---------------------------------------------------------------------------
-# Como testar (após `docker compose up --build`):
-#
-# Gere os certificados antes de subir (apenas uma vez):
-#   openssl genrsa -out certs/private.pem 2048
-#   openssl rsa -in certs/private.pem -pubout -out certs/public.pem
-#
-# Autenticar:
-#   curl -X POST http://localhost:8080/2015-03-31/functions/function/invocations \
-#     -H 'Content-Type: application/json' \
-#     -d '{"rawPath": "/login", "requestContext": {"http": {"method": "POST"}}, "body": "{\"email\": \"william_cesar_santos@hotmail.com\", \"password\": \"lambda_123_AUTHORIZE\"}"}'
-#
-# Obter JWKS (requer Bearer token obtido no passo anterior):
-#   curl -X POST http://localhost:8080/2015-03-31/functions/function/invocations \
-#     -H 'Content-Type: application/json' \
-#     -d '{"rawPath": "/.well-known/jwks.json", "requestContext": {"http": {"method": "GET"}}, "headers": {"Authorization": "Bearer <token>"}}'
+volumes:
+  lambda-zip:
+  gateway-config:
+
+networks:
+  lambda-authorize-net:
+    driver: bridge
